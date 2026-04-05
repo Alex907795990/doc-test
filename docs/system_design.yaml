@@ -398,6 +398,59 @@ api_definitions:
                 accuracy: number
                 language: string
                 achieved_at: string
+  
+  share:
+    create_share_link:
+      method: POST
+      path: /share
+      description: 创建分享链接（可选功能）
+      source: story-3
+      authentication: optional
+      request_body:
+        result_id:
+          type: string
+          description: 成绩记录ID
+        wpm:
+          type: number
+          required: true
+        accuracy:
+          type: number
+          required: true
+        language:
+          type: string
+          enum: [zh, en]
+          required: true
+        mode:
+          type: string
+          enum: [normal, challenge]
+          required: true
+      response:
+        success:
+          status: 201
+          body:
+            share_id: string
+            share_url: string
+            description: 可分享的链接地址
+    
+    get_shared_result:
+      method: GET
+      path: /share/{share_id}
+      description: 获取分享的成绩信息
+      source: story-3
+      authentication: not_required
+      response:
+        success:
+          status: 200
+          body:
+            wpm: number
+            accuracy: number
+            language: string
+            mode: string
+            username: string
+            created_at: string
+        error:
+          - status: 404
+            description: 分享链接不存在或已过期
 
 # ------------------------------------------------------------
 # 页面元素与视觉设计
@@ -474,6 +527,34 @@ ui_elements:
             - 再来一次
             - 查看排行榜
             - 分享成绩
+        
+        - name: 分享功能
+          source: story-3
+          description: 一键分享成绩截图到社交平台
+          elements:
+            - name: 分享按钮
+              position: 操作按钮区域
+              style: 赛博朋克风格图标按钮
+              trigger: 点击弹出分享面板
+            
+            - name: 分享面板
+              description: 弹出式分享选项面板
+              elements:
+                - 成绩截图预览
+                - 社交平台图标列表
+                - 复制链接按钮
+                - 保存图片按钮
+            
+            - name: 成绩截图
+              description: 自动生成的分享图片
+              content:
+                - 用户成绩（WPM、准确率）
+                - 测试模式标识（普通/限时挑战）
+                - 测试语言标识
+                - 品牌Logo/水印
+                - 赛博朋克风格背景
+              format: PNG
+              size: 适合社交平台分享的正方形或宽幅比例
     
     leaderboard:
       description: 排行榜页
@@ -611,6 +692,49 @@ frontend_logic:
         - 无需登录即可进行打字测试
         - 测试成绩不保存到服务器
         - 可随时引导用户注册/登录以保存成绩
+  
+  share:
+    source: story-3
+    description: 成绩分享功能
+    screenshot_generation:
+      description: 成绩截图生成逻辑
+      implementation:
+        - 使用 html2canvas 或 canvas API 生成截图
+        - 截图包含成绩数据、测试模式、语言、品牌元素
+        - 应用赛博朋克风格视觉设计
+      flow:
+        - 用户点击分享按钮
+        - 前端渲染成绩卡片组件（离屏或隐藏）
+        - 将组件转换为 Canvas
+        - 导出为 PNG 图片
+        - 显示分享面板
+    
+    social_sharing:
+      description: 社交平台分享逻辑
+      supported_platforms:
+        - name: 微信
+          method: 调用微信 JS-SDK 分享接口
+          content_type: 图片 + 链接
+        - name: 微博
+          method: 跳转微博分享链接
+          content_type: 图片 + 文字
+        - name: QQ
+          method: 调用 QQ 分享 SDK
+          content_type: 图片 + 链接
+        - name: 通用链接
+          method: 复制链接到剪贴板
+          content_type: URL
+        - name: 保存图片
+          method: 下载截图到本地
+          content_type: PNG 文件
+    
+    share_link:
+      description: 分享链接生成
+      format: "/share/{share_id}"
+      content:
+        - 包含加密的成绩ID或短码
+        - 打开链接可查看成绩详情页
+      optional: 可选功能，需要后端支持
 
 # ------------------------------------------------------------
 # 后端业务逻辑
@@ -753,6 +877,19 @@ business_rules:
       - 支持按语言筛选
       - 普通模式和挑战模式分开排名
       - 每页最多显示100名
+  
+  sharing:
+    source: story-3
+    description: 成绩分享规则
+    rules:
+      - 游客和登录用户均可分享成绩
+      - 分享截图不包含用户敏感信息
+      - 分享链接有效期可配置（如7天）
+      - 游客分享的成绩不保存到数据库
+      - 社交平台分享需集成对应平台SDK
+    privacy:
+      - 分享截图可选择性显示用户名
+      - 游客用户分享显示"匿名用户"
 
 # ------------------------------------------------------------
 # 待确认风险与决策点
@@ -790,3 +927,27 @@ pending_decisions:
       - B: 可选开启/关闭动效
       - C: 根据设备性能自动调整
     impact: 影响前端实现复杂度
+  
+  - id: SHARE-001
+    source: story-3
+    issue: 社交平台SDK集成范围
+    description: |
+      分享功能需要集成社交平台SDK，
+      需确认支持的社交平台范围。
+    options:
+      - A: 仅支持微信、微博、QQ三大平台
+      - B: 支持更多平台（抖音、小红书等）
+      - C: 仅提供保存图片和复制链接功能
+    impact: 影响前端SDK集成工作量
+  
+  - id: SHARE-002
+    source: story-3
+    issue: 分享链接持久化需求
+    description: |
+      是否需要后端生成可分享的链接，
+      以及分享记录是否需要持久化存储。
+    options:
+      - A: 纯前端截图分享，无需后端支持
+      - B: 生成分享链接，记录分享行为
+      - C: 生成分享链接，但仅短期缓存
+    impact: 影响后端API设计和数据库表结构
