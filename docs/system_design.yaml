@@ -1,0 +1,792 @@
+# ============================================================
+# 打字速度检测网站 - 系统设计文档
+# 版本: 1.0.0
+# 最后更新: 2026-04-05
+# ============================================================
+
+# ------------------------------------------------------------
+# 技术栈定义
+# ------------------------------------------------------------
+tech_stack:
+  frontend:
+    framework: React
+    language: TypeScript
+    description: |
+      前端使用 React + TypeScript 构建，
+      负责打字测试的实时交互、UI渲染和本地计算。
+  
+  backend:
+    framework: Node.js + Express
+    language: TypeScript
+    description: |
+      后端提供 RESTful API，处理用户认证、成绩存储和排行榜查询。
+  
+  database:
+    type: PostgreSQL
+    description: |
+      使用 PostgreSQL 存储用户数据、测试成绩和排行榜信息。
+  
+  security:
+    password_hashing: bcrypt
+    authentication: JWT (JSON Web Token)
+
+# ------------------------------------------------------------
+# 数据模型定义
+# ------------------------------------------------------------
+data_models:
+  user:
+    description: 用户账号信息
+    fields:
+      id:
+        type: UUID
+        primary_key: true
+        description: 用户唯一标识
+      phone:
+        type: VARCHAR(20)
+        unique: true
+        nullable: true
+        description: 手机号，用于注册登录（test_story）
+      email:
+        type: VARCHAR(255)
+        unique: true
+        nullable: true
+        description: 邮箱，用于注册登录（typing_speed_website）
+        _conflict_warning: |
+          需求冲突：typing_speed_website 要求邮箱登录，
+          test_story 要求手机号登录。需确认最终方案或支持两种方式。
+      password_hash:
+        type: VARCHAR(255)
+        required: true
+        description: 密码哈希值，使用 bcrypt 加密存储
+      created_at:
+        type: TIMESTAMP
+        default: CURRENT_TIMESTAMP
+        description: 账号创建时间
+      updated_at:
+        type: TIMESTAMP
+        description: 最后更新时间
+    constraints:
+      - 密码不允许明文存储，必须使用 bcrypt 加密
+      - 手机号或邮箱至少需要一个用于登录
+      - 游客用户不创建此记录
+  
+  test_result:
+    description: 打字测试成绩记录
+    fields:
+      id:
+        type: UUID
+        primary_key: true
+        description: 成绩记录唯一标识
+      user_id:
+        type: UUID
+        foreign_key: user.id
+        nullable: true
+        description: 关联用户ID，游客模式为空
+      wpm:
+        type: DECIMAL(10,2)
+        required: true
+        description: 每分钟字数 (Words Per Minute)
+      accuracy:
+        type: DECIMAL(5,2)
+        required: true
+        description: 准确率百分比，范围 0-100
+      language:
+        type: ENUM('zh', 'en')
+        required: true
+        description: 测试语言类型，中文或英文
+      mode:
+        type: ENUM('normal', 'challenge')
+        default: 'normal'
+        description: |
+          测试模式：
+          - normal: 普通模式，完成整段文本后结算
+          - challenge: 限时挑战模式，倒计时结束自动结算
+      duration_seconds:
+        type: INTEGER
+        nullable: true
+        description: |
+          限时挑战模式的时长（秒）。
+          可选值：30 / 60 / 120。
+          普通模式为空。
+      test_duration:
+        type: DECIMAL(10,2)
+        description: 实际测试耗时（秒）
+      text_length:
+        type: INTEGER
+        description: 测试文本总长度
+      correct_chars:
+        type: INTEGER
+        description: 正确输入字符数
+      incorrect_chars:
+        type: INTEGER
+        description: 错误输入字符数
+      created_at:
+        type: TIMESTAMP
+        default: CURRENT_TIMESTAMP
+        description: 测试完成时间
+    indexes:
+      - fields: [user_id, created_at]
+        description: 用户历史成绩查询优化
+      - fields: [wpm, language, mode]
+        description: 排行榜查询优化
+    constraints:
+      - 游客模式成绩不保存到数据库
+      - 挑战模式成绩与普通模式成绩分开存储（通过 mode 字段区分）
+
+  refresh_token:
+    description: JWT 刷新令牌
+    fields:
+      id:
+        type: UUID
+        primary_key: true
+      user_id:
+        type: UUID
+        foreign_key: user.id
+        required: true
+      token:
+        type: VARCHAR(512)
+        required: true
+        description: 刷新令牌值
+      expires_at:
+        type: TIMESTAMP
+        required: true
+        description: 令牌过期时间（创建后7天）
+      created_at:
+        type: TIMESTAMP
+        default: CURRENT_TIMESTAMP
+      revoked:
+        type: BOOLEAN
+        default: false
+        description: 是否已撤销
+    constraints:
+      - 刷新令牌有效期 7 天
+      - 用户登出时应撤销相关刷新令牌
+
+# ------------------------------------------------------------
+# API 接口定义
+# ------------------------------------------------------------
+api_definitions:
+  base_path: /api/v1
+  
+  authentication:
+    register:
+      method: POST
+      path: /users/register
+      description: 用户注册
+      source: test_story
+      request_body:
+        phone:
+          type: string
+          required: true
+          description: 手机号
+        password:
+          type: string
+          required: true
+          description: 密码
+      response:
+        success:
+          status: 201
+          body:
+            message: 注册成功
+            user_id: string
+        error:
+          - status: 400
+            description: 参数格式错误
+          - status: 409
+            description: 手机号已注册
+      validation:
+        - 手机号格式验证
+        - 手机号唯一性检查
+        - 密码强度要求（待定义）
+    
+    login:
+      method: POST
+      path: /users/login
+      description: 用户登录
+      source: test_story
+      request_body:
+        phone:
+          type: string
+          required: true
+          description: 手机号
+        password:
+          type: string
+          required: true
+          description: 密码
+      response:
+        success:
+          status: 200
+          body:
+            access_token: string
+            refresh_token: string
+            token_type: Bearer
+            expires_in: 7200
+            description: 访问令牌有效期2小时
+        error:
+          - status: 401
+            description: 手机号或密码错误
+    
+    refresh_token:
+      method: POST
+      path: /users/refresh
+      description: 刷新访问令牌
+      source: test_story
+      request_body:
+        refresh_token:
+          type: string
+          required: true
+          description: 刷新令牌
+      response:
+        success:
+          status: 200
+          body:
+            access_token: string
+            token_type: Bearer
+            expires_in: 7200
+        error:
+          - status: 401
+            description: 刷新令牌无效或已过期
+    
+    get_current_user:
+      method: GET
+      path: /users/me
+      description: 获取当前登录用户信息
+      source: test_story
+      authentication: required
+      headers:
+        Authorization: Bearer <access_token>
+      response:
+        success:
+          status: 200
+          body:
+            id: string
+            phone: string
+            created_at: string
+  
+  test_results:
+    save_result:
+      method: POST
+      path: /results
+      description: 保存测试成绩
+      source: typing_speed_website
+      authentication: required
+      request_body:
+        wpm:
+          type: number
+          required: true
+        accuracy:
+          type: number
+          required: true
+        language:
+          type: string
+          enum: [zh, en]
+          required: true
+        mode:
+          type: string
+          enum: [normal, challenge]
+          default: normal
+        duration_seconds:
+          type: integer
+          description: 限时挑战模式时长
+        test_duration:
+          type: number
+          description: 实际耗时秒数
+        text_length:
+          type: integer
+        correct_chars:
+          type: integer
+        incorrect_chars:
+          type: integer
+      response:
+        success:
+          status: 201
+          body:
+            id: string
+            message: 成绩保存成功
+    
+    get_user_results:
+      method: GET
+      path: /results/me
+      description: 获取当前用户历史成绩
+      source: typing_speed_website
+      authentication: required
+      query_params:
+        sort_by:
+          type: string
+          enum: [date, wpm]
+          default: date
+          description: 排序方式
+        order:
+          type: string
+          enum: [asc, desc]
+          default: desc
+        page:
+          type: integer
+          default: 1
+        limit:
+          type: integer
+          default: 20
+        mode:
+          type: string
+          enum: [normal, challenge]
+          description: 按模式筛选
+      response:
+        success:
+          status: 200
+          body:
+            data:
+              - id: string
+                wpm: number
+                accuracy: number
+                language: string
+                mode: string
+                created_at: string
+            pagination:
+              total: integer
+              page: integer
+              limit: integer
+    
+    get_best_result:
+      method: GET
+      path: /results/me/best
+      description: 获取当前用户最佳成绩
+      source: typing_speed_website
+      authentication: required
+      response:
+        success:
+          status: 200
+          body:
+            wpm: number
+            accuracy: number
+            language: string
+            achieved_at: string
+  
+  leaderboard:
+    get_global_leaderboard:
+      method: GET
+      path: /leaderboard
+      description: 获取全站排行榜
+      source: typing_speed_website, challenge_mode
+      query_params:
+        language:
+          type: string
+          enum: [zh, en, all]
+          default: all
+          description: 按语言筛选
+        mode:
+          type: string
+          enum: [normal, challenge]
+          default: normal
+          description: |
+            测试模式筛选：
+            - normal: 普通模式排行榜
+            - challenge: 限时挑战模式排行榜
+        limit:
+          type: integer
+          default: 100
+          maximum: 100
+          description: 每页最多100名
+      response:
+        success:
+          status: 200
+          body:
+            data:
+              - rank: integer
+                user_id: string
+                username: string
+                wpm: number
+                accuracy: number
+                language: string
+                achieved_at: string
+
+# ------------------------------------------------------------
+# 页面元素与视觉设计
+# ------------------------------------------------------------
+ui_elements:
+  theme:
+    name: 赛博朋克风格
+    source: story-2
+    description: |
+      整体采用赛博朋克风格的视觉设计，
+      包含霓虹色彩、科技感元素、暗色背景等特征。
+    color_palette:
+      primary: 霓虹蓝/青色
+      secondary: 霓虹粉/紫色
+      accent: 霓虹黄/橙色
+      background: 深色（深蓝/黑色）
+      text: 高对比度亮色
+  
+  pages:
+    home:
+      description: 首页/打字测试页
+      elements:
+        - name: 文本展示区
+          description: 显示待输入的测试文本
+          features:
+            - 支持中英文切换
+            - 当前待输入字符高亮
+            - 已输入正确字符样式
+            - 已输入错误字符样式
+        
+        - name: 输入区域
+          description: 用户打字输入框
+          features:
+            - 自动聚焦
+            - 实时输入反馈
+        
+        - name: 实时统计面板
+          description: 显示当前测试数据
+          elements:
+            - WPM 实时显示
+            - 准确率实时显示
+            - 已用时间计时器
+        
+        - name: 模式选择器
+          description: 切换测试模式
+          options:
+            - 普通模式
+            - 限时挑战模式
+        
+        - name: 时长选择器
+          source: challenge_mode
+          description: 限时挑战模式的时长选择
+          options:
+            - 30秒
+            - 60秒
+            - 120秒
+        
+        - name: 倒计时显示
+          source: challenge_mode
+          description: 限时挑战模式的倒计时显示
+    
+    result:
+      description: 测试结果页
+      elements:
+        - name: 成绩展示
+          elements:
+            - WPM 大字体显示
+            - 准确率百分比
+            - 测试时长
+            - 正确/错误字符数
+        
+        - name: 操作按钮
+          elements:
+            - 再来一次
+            - 查看排行榜
+            - 分享成绩
+    
+    leaderboard:
+      description: 排行榜页
+      elements:
+        - name: 模式切换标签
+          options:
+            - 普通模式排行
+            - 限时挑战排行
+        
+        - name: 语言筛选
+          options:
+            - 全部
+            - 中文
+            - 英文
+        
+        - name: 排名列表
+          description: 显示前100名用户成绩
+          columns:
+            - 排名
+            - 用户名
+            - WPM
+            - 准确率
+            - 语言
+            - 达成时间
+    
+    login:
+      description: 登录页
+      elements:
+        - 手机号输入框
+        - 密码输入框
+        - 登录按钮
+        - 注册链接
+        - 游客模式入口
+    
+    register:
+      description: 注册页
+      elements:
+        - 手机号输入框
+        - 密码输入框
+        - 确认密码输入框
+        - 注册按钮
+  
+  interactions:
+    typing_feedback:
+      source: story-2
+      description: 打字时的交互反馈
+      success:
+        description: 正确输入时的反馈
+        effects:
+          - 输入框字符高亮（正确颜色）
+          - 冲击力动效
+          - 可选：音效反馈
+      failure:
+        description: 错误输入时的反馈
+        effects:
+          - 输入框字符高亮（错误颜色）
+          - 抖动动效
+          - 可选：错误提示音
+    
+    animations:
+      source: story-2
+      description: 赛博朋克风格动效
+      examples:
+        - 霓虹光晕闪烁
+        - 输入时的粒子效果
+        - 完成时的爆炸/散射动效
+        - 页面切换的科技感过渡
+
+# ------------------------------------------------------------
+# 前端业务逻辑
+# ------------------------------------------------------------
+frontend_logic:
+  typing_test:
+    description: 打字测试核心逻辑
+    modes:
+      normal:
+        description: 普通模式
+        flow:
+          - 用户选择语言（中文/英文）
+          - 系统随机展示测试文本
+          - 用户开始输入，计时器启动
+          - 实时高亮正确/错误字符
+          - 用户完成全部文本输入
+          - 自动结算，计算 WPM 和准确率
+          - 登录用户自动保存成绩
+      
+      challenge:
+        source: challenge_mode
+        description: 限时挑战模式
+        flow:
+          - 用户选择时长（30秒/60秒/120秒）
+          - 系统展示测试文本（不限制长度）
+          - 用户开始输入，倒计时启动
+          - 实时高亮正确/错误字符
+          - 倒计时结束，自动结算
+          - 登录用户自动保存挑战成绩
+    
+    calculations:
+      wpm:
+        description: 每分钟字数计算
+        formula: "(正确字符数 / 5) / (测试秒数 / 60)"
+        note: |
+          英文单词按5个字符为一个单词计算，
+          中文可按实际字符数或按2-3字符为一个"词"计算。
+      
+      accuracy:
+        description: 准确率计算
+        formula: "正确字符数 / 总输入字符数 * 100"
+    
+    local_processing:
+      source: typing_speed_website
+      description: |
+        打字测试过程中的所有计算在前端本地完成，
+        无需实时请求后端，减少网络延迟。
+        仅在测试完成时发送结果到后端保存。
+
+  authentication:
+    token_management:
+      description: JWT Token 管理
+      access_token:
+        storage: 内存 / localStorage
+        expires_in: 2小时
+      refresh_token:
+        storage: localStorage (httpOnly cookie 更安全)
+        expires_in: 7天
+      auto_refresh:
+        description: |
+          在 access_token 过期前自动使用 refresh_token 刷新，
+          或在收到 401 响应时触发刷新。
+    
+    guest_mode:
+      source: typing_speed_website
+      description: 游客模式
+      behavior:
+        - 无需登录即可进行打字测试
+        - 测试成绩不保存到服务器
+        - 可随时引导用户注册/登录以保存成绩
+
+# ------------------------------------------------------------
+# 后端业务逻辑
+# ------------------------------------------------------------
+backend_logic:
+  user_service:
+    registration:
+      description: 用户注册流程
+      steps:
+        - 验证手机号格式
+        - 检查手机号是否已注册
+        - 使用 bcrypt 对密码进行哈希处理
+        - 创建用户记录
+        - 返回成功响应
+      error_handling:
+        - 手机号格式无效: 400 Bad Request
+        - 手机号已存在: 409 Conflict
+    
+    login:
+      description: 用户登录流程
+      steps:
+        - 验证手机号和密码参数
+        - 查询用户记录
+        - 使用 bcrypt 比对密码
+        - 生成 access_token (有效期2小时)
+        - 生成 refresh_token (有效期7天)
+        - 存储 refresh_token 到数据库
+        - 返回 tokens
+      error_handling:
+        - 用户不存在: 401 Unauthorized
+        - 密码错误: 401 Unauthorized
+    
+    token_refresh:
+      description: Token 刷新流程
+      steps:
+        - 验证 refresh_token 签名
+        - 检查 refresh_token 是否在数据库中且未撤销
+        - 检查 refresh_token 是否过期
+        - 生成新的 access_token
+        - 返回新 token
+      error_handling:
+        - token 无效或已撤销: 401 Unauthorized
+        - token 已过期: 401 Unauthorized
+  
+  result_service:
+    save_result:
+      description: 保存测试成绩
+      steps:
+        - 验证用户认证状态
+        - 验证成绩数据格式
+        - 创建成绩记录，关联用户ID
+        - 根据模式（normal/challenge）分别存储
+        - 更新排行榜缓存（如有）
+    
+    get_user_history:
+      description: 获取用户历史成绩
+      steps:
+        - 验证用户认证状态
+        - 按条件查询用户成绩记录
+        - 支持按日期/WPM排序
+        - 支持按模式筛选
+        - 分页返回结果
+    
+    get_best_result:
+      description: 获取用户最佳成绩
+      steps:
+        - 验证用户认证状态
+        - 查询该用户最高 WPM 的成绩记录
+        - 返回最佳成绩详情
+  
+  leaderboard_service:
+    get_rankings:
+      description: 获取排行榜
+      steps:
+        - 根据语言筛选条件构建查询
+        - 根据模式（normal/challenge）分别查询
+        - 按 WPM 降序排列
+        - 限制返回前100条
+        - 返回排名列表
+      caching:
+        description: |
+          排行榜数据可考虑缓存策略：
+          - Redis 缓存热门排行榜
+          - 定时刷新或数据变更时失效
+
+# ------------------------------------------------------------
+# 业务规则与约束
+# ------------------------------------------------------------
+business_rules:
+  test_modes:
+    normal:
+      description: 普通测试模式
+      rules:
+        - 必须完成全部测试文本
+        - 计时从第一次击键开始
+        - 完成后自动结算
+        - 成绩保存到普通模式记录
+    
+    challenge:
+      source: challenge_mode
+      description: 限时挑战模式
+      rules:
+        - 时长选项：30秒 / 60秒 / 120秒
+        - 文本长度不限制，持续展示
+        - 倒计时结束立即结算
+        - 成绩保存到挑战模式记录
+        - 与普通模式成绩分开存储和展示
+  
+  scoring:
+    wpm_calculation:
+      description: WPM 计算标准
+      rules:
+        - 英文：每5个字符计为1个单词
+        - 中文：计算方式待确认（按字符或词组）
+    
+    accuracy_calculation:
+      description: 准确率计算标准
+      rules:
+        - 准确率 = 正确字符数 / 总输入字符数
+        - 包含删除重新输入的情况
+  
+  user_accounts:
+    registration:
+      rules:
+        - 手机号必须唯一
+        - 密码必须使用 bcrypt 加密存储
+        - 不允许明文存储密码
+    
+    guest_access:
+      source: typing_speed_website
+      rules:
+        - 游客可进行测试
+        - 游客成绩不保存
+        - 登录后可保存成绩
+  
+  leaderboard:
+    rules:
+      - 仅显示登录用户的成绩
+      - 每个用户仅显示最高成绩
+      - 支持按语言筛选
+      - 普通模式和挑战模式分开排名
+      - 每页最多显示100名
+
+# ------------------------------------------------------------
+# 待确认风险与决策点
+# ------------------------------------------------------------
+pending_decisions:
+  - id: AUTH-001
+    issue: 登录方式冲突
+    description: |
+      typing_speed_story 要求邮箱+密码登录，
+      test_story 要求手机号+密码登录。
+    options:
+      - A: 仅支持手机号登录
+      - B: 仅支持邮箱登录
+      - C: 同时支持手机号和邮箱登录
+    impact: 影响 User 数据模型和认证 API 设计
+  
+  - id: CALC-001
+    issue: 中文 WPM 计算标准
+    description: |
+      中文打字的 WPM 计算标准未明确。
+      是按字符数还是按词数计算？
+    options:
+      - A: 按字符数直接计算
+      - B: 按每2-3字符为一个"词"计算
+      - C: 中英文使用不同计算公式
+    impact: 影响 WPM 计算逻辑和排行榜公平性
+  
+  - id: VISUAL-001
+    issue: 动效性能要求
+    description: |
+      赛博朋克风格动效可能影响性能，
+      需确认性能基准要求。
+    options:
+      - A: 确保低端设备流畅运行
+      - B: 可选开启/关闭动效
+      - C: 根据设备性能自动调整
+    impact: 影响前端实现复杂度
